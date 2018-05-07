@@ -1,4 +1,6 @@
-## Getting started
+# Getting started
+
+## Install command-line tools
 
 ### Install mecab
 
@@ -57,7 +59,7 @@ make
 sudo make install
 ```
 
-### Setup python libraries
+## Setup python libraries
 
 ※Python3は最新バージョンにしておく
 
@@ -85,6 +87,12 @@ http://nlp.ist.i.kyoto-u.ac.jp/index.php?PyKNP
 ```sh
 cd ~/Downloads/pyknp-0.3
 python setup.py install
+```
+
+おまけで
+
+```sh
+pip install mojimoji
 ```
 
 #### CaboCha
