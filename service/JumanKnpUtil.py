@@ -6,6 +6,124 @@ except Exception as e:
     import unicodedata
 import re
 
+class RepnameExtractor():
+    def __init__(self, options = GetRepnameOptions()):
+        self.options = options
+    def extract_from_fstring(self, fstring):
+        match = re.search(r"代表表記:(.+?)>", fstring)
+        if match is not None:
+            return match.group(1).split("?")[0]
+        return None
+    def extract_from_tag(self, tag):
+        repname = ""
+        # タグの内容語の代表表記
+        match = re.search(r"\<正規化代表表記:(.+?)\>", tag.fstring)
+        if match is not None:
+            repname = match.group(1)
+        else:
+            match = re.search(r"\<用言代表表記:(.+?)\>", tag.fstring)
+            if match is not None:
+                repname = match.group(1)
+        if self.options.num_normalize:
+            # 未実装
+            pass
+        return repname
+    def extract_from_mrph(self, mrph):
+        if not(JumanKnpUtil.is_match_partly("<準?内容語>", mrph.fstring)):
+            return ""
+        if JumanKnpUtil.is_match_partly("<特殊非見出語>", mrph.fstring):# 「後」など
+            return ""
+        match = re.search(r"<代表表記変更:(.+?)>", mrph.fstring)
+        if self.options.pos_change and (match is not None):
+            return match.group(1)
+        if self.options.num_normalize and mrph.bunrui == "数詞" and not(JumanKnpUtil.is_match_partly(r"^(?:何|幾)$", mrph.midasi)):
+            return "[数詞]"
+        match2 = re.search(r"<代表表記:(.+?)>", mrph.fstring)
+        if self.options.use_disambiguated_repname and (JumanKnpUtil.is_match_partly(r"<(?:用言|名詞)曖昧性解消>", mrph.fstring)) and (match2 is not None):
+            return match2.group(1)
+        match3 = re.search(r"<正規化代表表記:(.+?)>", mrph.fstring)
+        if match3 is not None:
+            return match3.group(1)
+        return ""
+    def extract_from_mlist(self, mlist):
+        # 形態素列から代表表記を得る(数詞を汎下するためなどに利用)
+        reps = []
+        if self.options.head:
+            # 主辞代表表記
+            for mrph in reversed(mlist):
+                rep = self.extract_from_mrph(mrph)
+                if rep == "":
+                    continue
+                # 数詞が連続しないように
+                if (rep == "[数詞]") and len(reps) > 0 and reps[-1] == "[数詞]":
+                    continue
+                reps.append(rep)
+                if JumanKnpUtil.is_match_partly(r"<内容語>", mrph.fstring) and not(JumanKnpUtil.is_match_partly(r"^[一-龥]$", mrph.midasi)):
+                    break
+            reps.reverse()
+        else:
+            for mrph in mlist:
+                rep = self.extract_from_mrph(mrph)
+                if rep == "":
+                    continue
+                if (rep == "[数詞]") and len(reps) > 0 and reps[-1] == "[数詞]":
+                    continue
+                reps.append(rep)
+        return "+".join(reps)
+    def extract_from_bnst(self, bnst):
+        repname = ""
+        mlist = bnst.mrph_list()
+        if self.options.pos_change:
+            opt = GetRepnameOptions()
+            opt.pos_change = True
+            extractor = RepnameExtractor(opt)
+            repname = extractor.extract_from_mlist(mlist)
+        elif self.options.use_disambiguated_repname or self.options.head:
+            opt = GetRepnameOptions()
+            opt.use_disambiguated_repname = opt.use_disambiguated_repname or self.options.use_disambiguated_repname
+            if self.options.head:
+                opt.head = True
+                opt.num_normalize = True
+            extractor = RepnameExtractor(opt)
+            repname = extractor.extract_from_mlist(mlist)
+        else:
+            match = JumanKnpUtil.get_value_from_fstring("正規化代表表記", bnst.fstring)
+            if match is not None:
+                repname = match
+        # 薄くする, 大切にする
+        if len(mlist) >= 2 and mlist[0].hinsi == '形容詞' and mlist[1].hinsi == '接尾辞':
+            match = re.search(r"^(する|なる)$", mlist[1].genkei)
+            if match is not None:
+                repname += "+{0}/{0}".format(match.group(1))
+        # 子供にくっつけるものがあるかどうかチェック
+        if self.options.child_check:
+            if repname == "する/する" or repname == "行う/おこなう":
+                child_repname = ""
+                child_repname_before_change = ""
+                for child in bnst.children:
+                    child_repname = self.extract_from_bnst(child)
+                    # サ変
+                    if JumanKnpUtil.is_match_partly(r"<ヲ>", child.fstring) and JumanKnpUtil.is_match_partly(r"<サ変>", child.fstring):
+                        child.skip = True
+                        return child_repname
+                    if JumanKnpUtil.is_match_partly(r"<[ヲニ]>", child.fstring) and JumanKnpUtil.is_meishika(child_repname):
+                        # 連用形名詞化 (例: 仕分けをする, 千切りにする)
+                        child.skip = True
+                        opt = GetRepnameOptions()
+                        opt.pos_change = True
+                        extractor = RepnameExtractor(opt)
+                        child_repname_before_change = extractor.extract_from_bnst(child)
+                        return child_repname_before_change
+                # 副詞 + する は副詞を述語にくっつける
+                # 例:) ゆっくりする
+                for child in bnst.children:
+                    if JumanKnpUtil.is_match_partly(r"<副詞>", child.fstring) and child.bnst_id == (bnst.bnst_id - 1):
+                        # perlではget_repname_from_tagを使っているけどバグでは？
+                        extractor = RepnameExtractor()
+                        repname = "{}+{}".format(extractor.extract_from_bnst(child), repname)
+                        child.skip = True
+        return repname
+
 class GetRepnameOptions(object):
     def __init__(self):
         self.child_check = False
@@ -31,7 +149,7 @@ class GetChildOptions(object):
 class JumanKnpUtil(object):
     PARENT_NONE = -1
     @staticmethod
-    def format_string(string):
+    def format_input_string(string):
         if mojimoji is not None:
             return mojimoji.han_to_zen(string.replace("\n", ""))
         else:
@@ -58,123 +176,6 @@ class JumanKnpUtil(object):
     @staticmethod
     def get_list_from_fstring(fstring):
         return [f for f in fstring.strip("<>").split("><")]
-    @staticmethod
-    def get_repname_from_fstring(fstring):
-        match = re.search(r"代表表記:(.+?)>", fstring)
-        if match is None:
-            return None
-        else:
-            return match.group(1).split("?")[0]
-    @staticmethod
-    def get_repname_from_tag(tag, option):
-        repname = ""
-        # タグの内容語の代表表記
-        match = re.search(r"\<正規化代表表記:(.+?)\>", tag.fstring)
-        if match is not None:
-            repname = match.group(1)
-        else:
-            match = re.search(r"\<用言代表表記:(.+?)\>", tag.fstring)
-            if match is not None:
-                repname = match.group(1)
-        if option.num_normalize:
-            # 未実装
-            pass
-        return repname
-    @staticmethod
-    def get_repname_from_mrph(mrph, option):
-        if not(JumanKnpUtil.is_match_partly("<準?内容語>", mrph.fstring)):
-            return ""
-        if JumanKnpUtil.is_match_partly("<特殊非見出語>", mrph.fstring):# 「後」など
-            return ""
-        rep = ""
-        match = re.search(r"<代表表記変更:(.+?)>", mrph.fstring)
-        if option.pos_change and (match is not None):
-            return match.group(1)
-        if option.num_normalize and mrph.bunrui == "数詞" and not(JumanKnpUtil.is_match_partly(r"^(?:何|幾)$", mrph.midasi)):
-            return "[数詞]"
-        match2 = re.search(r"<代表表記:(.+?)>", mrph.fstring)
-        if option.use_disambiguated_repname and (JumanKnpUtil.is_match_partly(r"<(?:用言|名詞)曖昧性解消>", mrph.fstring)) and (match2 is not None):
-            return match2.group(1)
-        match3 = re.search(r"<正規化代表表記:(.+?)>", mrph.fstring)
-        if match3 is not None:
-            return match3.group(1)
-        return ""
-    @staticmethod
-    def get_repname_from_mlist(mlist, option):
-        # 形態素列から代表表記を得る(数詞を汎下するためなどに利用)
-        reps = []
-        if option.head:
-            # 主辞代表表記
-            for mrph in reversed(mlist):
-                rep = JumanKnpUtil.get_repname_from_mrph(mrph, option)
-                if rep == "":
-                    continue
-                # 数詞が連続しないように
-                if (rep == "[数詞]") and len(reps) > 0 and reps[-1] == "[数詞]":
-                    continue
-                reps.append(rep)
-                if JumanKnpUtil.is_match_partly(r"<内容語>", mrph.fstring) and not(JumanKnpUtil.is_match_partly(r"^[一-龥]$", mrph.midasi)):
-                    break
-            reps.reverse()
-        else:
-            for mrph in mlist:
-                rep = JumanKnpUtil.get_repname_from_mrph(mrph, option)
-                if rep == "":
-                    continue
-                if (rep == "[数詞]") and len(reps) > 0 and reps[-1] == "[数詞]":
-                    continue
-                reps.append(rep)
-        return "+".join(reps)
-    @staticmethod
-    def get_repname_from_bnst(bnst, option):
-        repname = ""
-        mlist = bnst.mrph_list()
-        if option.pos_change:
-            opt = GetRepnameOptions()
-            opt.pos_change = True
-            repname = JumanKnpUtil.get_repname_from_mlist(mlist, opt)
-        elif option.use_disambiguated_repname or option.head:
-            opt = GetRepnameOptions()
-            opt.use_disambiguated_repname = opt.use_disambiguated_repname or option.use_disambiguated_repname
-            if option.head:
-                opt.head = True
-                opt.num_normalize = True
-            repname = JumanKnpUtil.get_repname_from_mlist(mlist, opt)
-        else:
-            match = JumanKnpUtil.get_value_from_fstring("正規化代表表記", bnst.fstring)
-            if match is not None:
-                repname = match
-        # 薄くする, 大切にする
-        if len(mlist) >= 2 and mlist[0].hinsi == '形容詞' and mlist[1].hinsi == '接尾辞':
-            match = re.search(r"^(する|なる)$", mlist[1].genkei)
-            if match is not None:
-                repname += "+{0}/{0}".format(match.group(1))
-        # 子供にくっつけるものがあるかどうかチェック
-        if option.child_check:
-            if repname == "する/する" or repname == "行う/おこなう":
-                child_repname = ""
-                child_repname_before_change = ""
-                for child in bnst.children:
-                    child_repname = JumanKnpUtil.get_repname_from_bnst(child, GetRepnameOptions())
-                    # サ変
-                    if JumanKnpUtil.is_match_partly(r"<ヲ>", child.fstring) and JumanKnpUtil.is_match_partly(r"<サ変>", child.fstring):
-                        child.skip = True
-                        return child_repname
-                    if JumanKnpUtil.is_match_partly(r"<[ヲニ]>", child.fstring) and JumanKnpUtil.is_meishika(child_repname):
-                        # 連用形名詞化 (例: 仕分けをする, 千切りにする)
-                        child.skip = True
-                        opt = GetRepnameOptions()
-                        opt.pos_change = True
-                        child_repname_before_change = JumanKnpUtil.get_repname_from_bnst(child, opt)
-                        return child_repname_before_change
-                # 副詞 + する は副詞を述語にくっつける
-                # 例:) ゆっくりする
-                for child in bnst.children:
-                    if JumanKnpUtil.is_match_partly(r"<副詞>", child.fstring) and child.bnst_id == (bnst.bnst_id - 1):
-                        # perlではget_repname_from_tagを使っているけどバグでは？
-                        repname = "{}+{}".format(JumanKnpUtil.get_repname_from_bnst(child, GetRepnameOptions()), repname)
-                        child.skip = True
-        return repname
     @staticmethod
     def is_meishika(repname):
         # 代表表記が名詞化されているかどうか
