@@ -13,6 +13,12 @@ brew install mecab-ipadic
 
 https://github.com/neologd/mecab-ipadic-neologd
 
+Make sure unxz installed.
+
+```sh
+brew install xz
+```
+
 ```sh
 git clone --depth 1 https://github.com/neologd/mecab-ipadic-neologd.git
 cd mecab-ipadic-neologd
